@@ -1,206 +1,136 @@
 pipeline {
-    
-agent any
 
-options {
-    timestamps()
-    timeout(time: 30, unit: 'MINUTES')
-}
+    agent any
 
-environment {
-
-    DOCKER_HUB_USER = "srinidhisanjeevi"
-
-    BACKEND_IMAGE = "${DOCKER_HUB_USER}/auth-backend:${params.IMAGE_TAG}"
-    FRONTEND_IMAGE = "${DOCKER_HUB_USER}/auth-frontend:${params.IMAGE_TAG}"
-}
-
-stages {
-
-    stage('Checkout Code') {
-        steps {
-            echo 'Downloading latest source code from GitHub'
-            checkout scm
-        }
+    options {
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
     }
 
-    stage('Verify Repository Structure') {
-        steps {
-            sh 'pwd'
-            sh 'ls -la'
-            sh 'ls -la backend'
-            sh 'ls -la frontend'
-        }
+    environment {
+
+        AWS_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = '226236025590'
+
+        BACKEND_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/homeservice-backend-v2"
+        FRONTEND_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/homeservice-frontend-v2"
+
+        IMAGE_TAG = "${BUILD_NUMBER}"
     }
 
-    stage('Environment Validation') {
-        steps {
-            sh 'node -v'
-            sh 'npm -v'
-            sh 'docker --version'
-            sh 'git --version'
-        }
-    }
+    stages {
 
-    stage('Install Backend Dependencies') {
-        steps {
-            dir('backend') {
-                sh 'npm install'
+        stage('Checkout Source Code') {
+            steps {
+                echo 'Fetching source code from GitHub'
+                checkout scm
             }
         }
-    }
 
-    stage('Show Parameters') {
-        steps {
-            echo "Selected Tag: ${params.IMAGE_TAG}"
-        }
-    }
-
-    stage('Optional Security Scan') {
-        steps {
-
-            catchError(
-                buildResult: 'SUCCESS',
-                stageResult: 'FAILURE'
-            ) {
-
-                echo 'Running Security Scan'
-
-                dir('backend') {
-                    sh 'npm audit'
-                }
-            }
-        }
-    }
-
-    stage('Build Images') {
-
-        parallel {
-
-            stage('Backend Build') {
-
-                steps {
-
-                    echo 'Building Backend Image'
-
-                    sh """
-                    docker build \
-                    -t ${BACKEND_IMAGE} \
-                    backend
-                    """
-                }
-            }
-
-            stage('Frontend Build') {
-
-                steps {
-
-                    echo 'Building Frontend Image'
-
-                    sh """
-                    docker build \
-                    -t ${FRONTEND_IMAGE} \
-                    frontend
-                    """
-                }
-            }
-        }
-    }
-
-    stage('Verify Docker Images') {
-        steps {
-            sh 'docker images | grep srinidhisanjeevi'
-        }
-    }
-
-    stage('Docker Hub Login') {
-        steps {
-
-            withCredentials([
-                usernamePassword(
-                    credentialsId: 'dockerhub-creds',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
-                )
-            ]) {
-
+        stage('Validate Environment') {
+            steps {
                 sh '''
-                echo "$DOCKER_PASS" | docker login \
-                -u "$DOCKER_USER" \
-                --password-stdin
+                echo "=== Environment Validation ==="
+
+                git --version
+                docker --version
+                aws --version
+
+                pwd
+                ls -la
+                '''
+            }
+        }
+
+        stage('Build Backend Image') {
+            steps {
+                sh """
+                docker build \
+                -t ${BACKEND_REPO}:${IMAGE_TAG} \
+                -t ${BACKEND_REPO}:latest \
+                backend
+                """
+            }
+        }
+
+        stage('Build Frontend Image') {
+            steps {
+                sh """
+                docker build \
+                -t ${FRONTEND_REPO}:${IMAGE_TAG} \
+                -t ${FRONTEND_REPO}:latest \
+                frontend
+                """
+            }
+        }
+
+        stage('Verify Local Images') {
+            steps {
+                sh '''
+                docker images | grep homeservice
+                '''
+            }
+        }
+
+        stage('Login To Amazon ECR') {
+            steps {
+                sh '''
+                aws ecr get-login-password \
+                --region ${AWS_REGION} | \
+                docker login \
+                --username AWS \
+                --password-stdin \
+                ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                '''
+            }
+        }
+
+        stage('Push Backend Image') {
+            steps {
+                sh """
+                docker push ${BACKEND_REPO}:${IMAGE_TAG}
+                docker push ${BACKEND_REPO}:latest
+                """
+            }
+        }
+
+        stage('Push Frontend Image') {
+            steps {
+                sh """
+                docker push ${FRONTEND_REPO}:${IMAGE_TAG}
+                docker push ${FRONTEND_REPO}:latest
+                """
+            }
+        }
+
+        stage('Verify Images In ECR') {
+            steps {
+                sh '''
+                aws ecr describe-images \
+                --repository-name homeservice-backend-v2 \
+                --region ${AWS_REGION}
+
+                aws ecr describe-images \
+                --repository-name homeservice-frontend-v2 \
+                --region ${AWS_REGION}
                 '''
             }
         }
     }
 
-    stage('Push Images') {
+    post {
 
-        parallel {
+        success {
+            echo 'Pipeline completed successfully'
+        }
 
-            stage('Push Backend') {
+        failure {
+            echo 'Pipeline failed'
+        }
 
-                steps {
-
-                    script {
-
-                        try {
-
-                            echo 'Pushing Backend Image'
-
-                            sh """
-                            docker push ${BACKEND_IMAGE}
-                            """
-
-                        } catch(Exception e) {
-
-                            echo 'Backend Push Failed'
-                        }
-                    }
-                }
-            }
-
-            stage('Push Frontend') {
-
-                steps {
-
-                    script {
-
-                        try {
-
-                            echo 'Pushing Frontend Image'
-
-                            sh """
-                            docker push ${FRONTEND_IMAGE}
-                            """
-
-                        } catch(Exception e) {
-
-                            echo 'Frontend Push Failed'
-                        }
-                    }
-                }
-            }
+        always {
+            sh 'docker logout || true'
+            echo 'Pipeline execution finished'
         }
     }
-}
-
-post {
-
-    success {
-        echo 'Pipeline completed successfully'
-    }
-
-    failure {
-        echo 'Pipeline failed'
-    }
-
-    always {
-
-        sh 'docker logout || true'
-
-        echo 'Pipeline execution finished'
-    }
-}
-
-
 }
