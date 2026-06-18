@@ -52,15 +52,7 @@ pipeline {
     }
 }
 
-        
-        stage('Verify AWS Identity') {
-    steps {
-        sh '''
-        export AWS_PAGER=""
-        aws sts get-caller-identity
-        '''
-    }
-}
+    
         stage('Build Backend Image') {
             steps {
                 sh """
